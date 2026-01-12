@@ -10,8 +10,9 @@ use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::fs::{File, OpenOptions};
+use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Runner {
@@ -188,6 +189,7 @@ struct SummaryReport {
 }
 
 fn jsonl_writer(path: &str) -> anyhow::Result<BufWriter<File>> {
+    ensure_parent_dir(path)?;
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     Ok(BufWriter::new(file))
 }
@@ -200,8 +202,19 @@ fn write_jsonl<T: Serialize>(writer: &mut BufWriter<File>, value: &T) -> anyhow:
 }
 
 fn write_summary(path: &str, report: &SummaryReport) -> anyhow::Result<()> {
+    ensure_parent_dir(path)?;
     let file = File::create(path)?;
     serde_json::to_writer_pretty(file, report)?;
+    Ok(())
+}
+
+fn ensure_parent_dir(path: &str) -> anyhow::Result<()> {
+    let parent = Path::new(path).parent();
+    if let Some(parent) = parent {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all(parent)?;
+        }
+    }
     Ok(())
 }
 
