@@ -35,5 +35,4 @@ impl RsaGroup {
     pub fn one(&self) -> BigUint {
         BigUint::one()
     }
-
 }

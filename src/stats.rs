@@ -1,3 +1,4 @@
+#[derive(Debug, serde::Serialize)]
 pub struct StatsSummary {
     pub mean_ns: f64,
     pub std_ns: f64,
@@ -5,9 +6,15 @@ pub struct StatsSummary {
     pub p90_ns: u128,
     pub p99_ns: u128,
     pub jitter_mean_ns: f64,
+    pub adj_jitter_mean_abs_ns: f64,
+    pub adj_jitter_p99_abs_ns: u128,
+    pub drift_max_pos_ns: i128,
+    pub drift_max_neg_ns: i128,
+    pub sample_count: usize,
+    pub ticks_per_second_mean: f64,
 }
 
-pub fn summarize(durations: &[u128]) -> Option<StatsSummary> {
+pub fn summarize(durations: &[u128], target_duration_ns: Option<u128>) -> Option<StatsSummary> {
     if durations.is_empty() {
         return None;
     }
@@ -35,6 +42,22 @@ pub fn summarize(durations: &[u128]) -> Option<StatsSummary> {
     } else {
         jitter.iter().sum::<i128>() as f64 / jitter.len() as f64
     };
+    let adj_jitter_abs: Vec<u128> = jitter.iter().map(|value| value.unsigned_abs()).collect();
+    let adj_jitter_mean_abs = if adj_jitter_abs.is_empty() {
+        0.0
+    } else {
+        adj_jitter_abs.iter().sum::<u128>() as f64 / adj_jitter_abs.len() as f64
+    };
+    let mut adj_sorted = adj_jitter_abs.clone();
+    adj_sorted.sort_unstable();
+    let adj_p99 = percentile(&adj_sorted, 99.0);
+    let drift_base = target_duration_ns.map(|value| value as f64).unwrap_or(mean);
+    let (drift_max_pos, drift_max_neg) = drift_extremes(durations, drift_base);
+    let ticks_per_second_mean = if mean > 0.0 {
+        1_000_000_000.0 / mean
+    } else {
+        0.0
+    };
     Some(StatsSummary {
         mean_ns: mean,
         std_ns: std,
@@ -42,6 +65,12 @@ pub fn summarize(durations: &[u128]) -> Option<StatsSummary> {
         p90_ns: p90,
         p99_ns: p99,
         jitter_mean_ns: jitter_mean,
+        adj_jitter_mean_abs_ns: adj_jitter_mean_abs,
+        adj_jitter_p99_abs_ns: adj_p99,
+        drift_max_pos_ns: drift_max_pos,
+        drift_max_neg_ns: drift_max_neg,
+        sample_count: durations.len(),
+        ticks_per_second_mean,
     })
 }
 
@@ -51,4 +80,20 @@ fn percentile(sorted: &[u128], pct: f64) -> u128 {
     }
     let rank = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
     sorted[rank]
+}
+
+fn drift_extremes(durations: &[u128], mean: f64) -> (i128, i128) {
+    let mut drift: i128 = 0;
+    let mut max_pos: i128 = 0;
+    let mut max_neg: i128 = 0;
+    for value in durations {
+        drift += *value as i128 - mean.round() as i128;
+        if drift > max_pos {
+            max_pos = drift;
+        }
+        if drift < max_neg {
+            max_neg = drift;
+        }
+    }
+    (max_pos, max_neg)
 }

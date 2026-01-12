@@ -1,4 +1,5 @@
 mod config;
+mod event;
 mod group;
 mod hash;
 mod runner;
