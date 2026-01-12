@@ -1,14 +1,17 @@
 use crate::config::{Config, InputMode, ProofAlgo};
+use crate::event::{TimeUnit, TimeUnitEvent};
 use crate::group::RsaGroup;
 use crate::stats::summarize;
 use crate::vdf::{eval, verify};
-use csv::Writer;
 use num_bigint::BigUint;
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Runner {
@@ -29,22 +32,10 @@ impl Runner {
         let group = RsaGroup::new(modulus);
         let mut x = random_bytes(&mut rng, 32);
         let run_id = build_run_id(&self.config)?;
+        let run_start = Instant::now();
         let mut durations = Vec::with_capacity(self.config.tasks.ticks);
 
-        let mut writer = csv_writer(&self.config.storage.csv_path)?;
-        writer.write_record([
-            "run_id",
-            "tick_index",
-            "start_ns",
-            "end_ns",
-            "duration_ns",
-            "mode",
-            "t",
-            "k",
-            "proof_algo",
-            "ok",
-            "err_msg",
-        ])?;
+        let mut writer = jsonl_writer(&self.config.output.events_jsonl_path)?;
 
         for tick_index in 0..self.config.tasks.ticks {
             match self.config.tasks.mode {
@@ -54,11 +45,10 @@ impl Runner {
                 }
                 InputMode::Chained => {}
             }
-            let start_wall = SystemTime::now();
             let start = Instant::now();
             let output = eval(&group, &x, self.config.vdf.t, self.config.vdf.k);
             let duration = start.elapsed();
-            let end_wall = start_wall + duration;
+            let verify_start = Instant::now();
             let ok = verify(
                 &group,
                 &output.g,
@@ -67,20 +57,33 @@ impl Runner {
                 self.config.vdf.t,
                 self.config.vdf.k,
             );
+            let verify_duration = verify_start.elapsed();
             let err_msg = if ok { "" } else { "verify_failed" };
-            writer.write_record([
-                run_id.as_str(),
-                tick_index.to_string().as_str(),
-                to_ns(start_wall)?.to_string().as_str(),
-                to_ns(end_wall)?.to_string().as_str(),
-                duration.as_nanos().to_string().as_str(),
-                mode_name(self.config.tasks.mode),
-                self.config.vdf.t.to_string().as_str(),
-                self.config.vdf.k.to_string().as_str(),
-                proof_name(self.config.vdf.proof_algo),
-                ok.to_string().as_str(),
-                err_msg,
-            ])?;
+            let start_offset = run_start.elapsed().saturating_sub(duration);
+            let unit = TimeUnit {
+                unit_id: tick_index as u64,
+                unit_type: "vdf_tick".to_string(),
+                target_duration_ns: self.config.vdf.target_duration_ns,
+                start_ts_ns: start_offset.as_nanos(),
+                end_ts_ns: start_offset.as_nanos() + duration.as_nanos(),
+                duration_ns: duration.as_nanos(),
+                work_amount: Some(self.config.vdf.t),
+                proof_size_bytes: Some(output.proof.to_bytes_be().len()),
+                verify_time_ns: Some(verify_duration.as_nanos()),
+                metadata: vdf_metadata(
+                    self.config.tasks.mode,
+                    self.config.vdf.t,
+                    self.config.vdf.k,
+                    self.config.vdf.proof_algo,
+                    ok,
+                    err_msg,
+                ),
+            };
+            let event = TimeUnitEvent {
+                run_id: run_id.clone(),
+                unit,
+            };
+            write_jsonl(&mut writer, &event)?;
             if tick_index >= self.config.tasks.warmup {
                 durations.push(duration.as_nanos());
             }
@@ -93,14 +96,15 @@ impl Runner {
         }
         writer.flush()?;
 
-        if let Some(summary) = summarize(&durations) {
-            println!("run_id: {}", run_id);
-            println!("mean_ns: {:.2}", summary.mean_ns);
-            println!("std_ns: {:.2}", summary.std_ns);
-            println!("p50_ns: {}", summary.p50_ns);
-            println!("p90_ns: {}", summary.p90_ns);
-            println!("p99_ns: {}", summary.p99_ns);
-            println!("jitter_mean_ns: {:.2}", summary.jitter_mean_ns);
+        if let Some(summary) = summarize(&durations, self.config.vdf.target_duration_ns) {
+            let report = SummaryReport {
+                run_id,
+                unit_type: "vdf_tick".to_string(),
+                target_duration_ns: self.config.vdf.target_duration_ns,
+                summary,
+            };
+            write_summary(&self.config.output.summary_json_path, &report)?;
+            println!("wrote_summary: {}", self.config.output.summary_json_path);
         }
         Ok(())
     }
@@ -143,10 +147,6 @@ fn next_challenge(x: &[u8], y: &BigUint, tick_index: u64) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-fn to_ns(time: SystemTime) -> anyhow::Result<u128> {
-    Ok(time.duration_since(UNIX_EPOCH)?.as_nanos())
-}
-
 fn build_run_id(config: &Config) -> anyhow::Result<String> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let git_commit = std::process::Command::new("git")
@@ -164,11 +164,6 @@ fn build_run_id(config: &Config) -> anyhow::Result<String> {
     Ok(format!("{}-{}-{}", now, git_commit, &config_hash[..8]))
 }
 
-fn csv_writer(path: &str) -> anyhow::Result<Writer<std::fs::File>> {
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
-    Ok(Writer::from_writer(file))
-}
-
 fn mode_name(mode: InputMode) -> &'static str {
     match mode {
         InputMode::FixedInput => "fixed-input",
@@ -182,4 +177,48 @@ fn proof_name(algo: ProofAlgo) -> &'static str {
         ProofAlgo::Alg4 => "alg4",
         ProofAlgo::Alg5 => "alg5",
     }
+}
+
+#[derive(Debug, Serialize)]
+struct SummaryReport {
+    run_id: String,
+    unit_type: String,
+    target_duration_ns: Option<u128>,
+    summary: crate::stats::StatsSummary,
+}
+
+fn jsonl_writer(path: &str) -> anyhow::Result<BufWriter<File>> {
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    Ok(BufWriter::new(file))
+}
+
+fn write_jsonl<T: Serialize>(writer: &mut BufWriter<File>, value: &T) -> anyhow::Result<()> {
+    let line = serde_json::to_string(value)?;
+    writer.write_all(line.as_bytes())?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn write_summary(path: &str, report: &SummaryReport) -> anyhow::Result<()> {
+    let file = File::create(path)?;
+    serde_json::to_writer_pretty(file, report)?;
+    Ok(())
+}
+
+fn vdf_metadata(
+    mode: InputMode,
+    t: u64,
+    k: usize,
+    proof_algo: ProofAlgo,
+    ok: bool,
+    err_msg: &str,
+) -> Value {
+    serde_json::json!({
+        "mode": mode_name(mode),
+        "t": t,
+        "k": k,
+        "proof_algo": proof_name(proof_algo),
+        "ok": ok,
+        "err_msg": err_msg,
+    })
 }

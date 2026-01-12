@@ -14,5 +14,6 @@ kappa = 16
 [runner]
 cooldown_ms = 0
 
-[storage]
-csv_path = "runs.csv"
+[output]
+events_jsonl_path = "out/raw_events.jsonl"
+summary_json_path = "out/summaries/vdf_summary.json"

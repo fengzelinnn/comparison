@@ -5,7 +5,7 @@ pub struct Config {
     pub tasks: TasksConfig,
     pub vdf: VdfConfig,
     pub runner: RunnerConfig,
-    pub storage: StorageConfig,
+    pub output: OutputConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -23,6 +23,7 @@ pub struct VdfConfig {
     pub k: usize,
     pub proof_algo: ProofAlgo,
     pub kappa: Option<usize>,
+    pub target_duration_ns: Option<u128>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -31,8 +32,9 @@ pub struct RunnerConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct StorageConfig {
-    pub csv_path: String,
+pub struct OutputConfig {
+    pub events_jsonl_path: String,
+    pub summary_json_path: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
